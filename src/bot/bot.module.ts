@@ -1,19 +1,37 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { BotService } from './bot.service';
-import { StudentsModule } from '../students/students.module';
-import { EventsModule } from '../events/events.module';
-import { ParticipationsModule } from '../participations/participations.module';
+import { RegistrationService } from './RegistrationService';
+import { CertificateService } from './CertificateService';
+import { NotificationService } from './NotificationService';
+import { StudentsService } from '../students/students.service';
+import { EventsService } from '../events/events.service';
+import { ParticipationsService } from '../participations/participations.service';
 import { GroupsService } from '../groups/groups.service';
-import { StatisticsModule } from '../statistics/statistics.module'; 
+import { StatisticsService } from '../statistics/statistics.service';
+import { Student } from '../students/student.entity';
+import { Event } from '../events/event.entity';
+import { Participation } from '../participations/participation.entity';
 
 @Module({
   imports: [
-    StudentsModule, 
-    EventsModule, 
-    ParticipationsModule,
-    StatisticsModule, 
+    ConfigModule.forRoot(),
+    ScheduleModule.forRoot(),
+    TypeOrmModule.forFeature([Student, Event, Participation]),
   ],
-  providers: [BotService, GroupsService],
+  providers: [
+    BotService,
+    RegistrationService,
+    CertificateService,
+    NotificationService,
+    StudentsService,
+    EventsService,
+    ParticipationsService,
+    GroupsService,
+    StatisticsService,
+  ],
   exports: [BotService],
 })
 export class BotModule {}
