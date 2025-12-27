@@ -2,25 +2,30 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Context, Markup } from 'telegraf';
 import { StudentsService } from '../students/students.service';
 import { GroupsService } from '../groups/groups.service';
-import { ParticipationsService } from '../participations/participations.service'; 
+import { ParticipationsService } from '../participations/participations.service';
+import { EventsService } from '../events/events.service';
+import { StateService } from './state.service';
+import { UserState, StudentData } from './interfaces';
+import { UserStep, CallbackAction, GROUPS_PER_PAGE } from './constants';
 
 @Injectable()
 export class RegistrationService {
   private readonly logger = new Logger(RegistrationService.name);
-  private userStates = new Map<number, any>();
 
   constructor(
     private studentsService: StudentsService,
     private groupsService: GroupsService,
-    private participationsService: ParticipationsService, 
+    private participationsService: ParticipationsService,
+    private eventsService: EventsService,
+    private stateService: StateService,
   ) {}
 
-  async handleStart(ctx: Context) {
+  async handleStart(ctx: Context): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const existingStudent = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (existingStudent) {
       await ctx.reply(
         `С возвращением, ${existingStudent.first_name}!`,
@@ -29,86 +34,66 @@ export class RegistrationService {
       return;
     }
 
-    // Начинаем процесс регистрации
-    this.userStates.set(telegramId, { step: 'registration' });
+    this.stateService.setUserState(telegramId, { step: UserStep.REGISTRATION });
     await ctx.reply(
       'Добро пожаловать! Для регистрации введите ваше ФИО (например: Иванов Иван Иванович):'
     );
   }
 
-  async handleText(ctx: Context, text: string) {
+  async handleText(ctx: Context, text: string, userState?: UserState): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
+    const currentState = userState || this.stateService.getUserState(telegramId);
 
-    // Обработка команд из клавиатуры
-    switch (text) {
-      case '👤 Мой профиль':
-        await this.handleProfile(ctx);
-        break;
-      
-      case '📊 Все мероприятия':
-        // Обработка в другом сервисе
-        break;
-      
-      case '📎 Отправить сертификат':
-        // Обработка в CertificateService
-        break;
-      
-      case '⭐ Мой рейтинг':
-        await this.handleRating(ctx);
-        break;
-      
-      case '📅 Мои мероприятия':
-        // Обработка в другом сервисе
-        break;
-      
-      default:
-        // Обработка состояний регистрации и редактирования ФИО
-        const userState = this.userStates.get(telegramId);
-        if (userState && userState.step === 'registration' && !userState.fio) {
-          await this.handleFioInput(ctx, text);
-        } else if (userState && userState.step === 'editing_fio') {
-          await this.handleFioEdit(ctx, text);
-        }
-        break;
+    if (currentState?.step === UserStep.REGISTRATION && !currentState.fio) {
+      await this.handleFioInput(ctx, text);
+    } else if (currentState?.step === UserStep.EDITING_FIO) {
+      await this.handleFioEdit(ctx, text);
     }
   }
 
-  private async handleFioInput(ctx: Context, text: string) {
+  private async handleFioInput(ctx: Context, text: string): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
-    const userState = this.userStates.get(telegramId);
-    
-    const fioParts = text.trim().split(' ');
+    const fioParts = text.trim().split(' ').filter(part => part.length > 0);
+
     if (fioParts.length < 2) {
       await ctx.reply('Пожалуйста, введите ФИО полностью (например: Иванов Иван Иванович):');
       return;
     }
 
-    userState.fio = {
-      last_name: fioParts[0],
-      first_name: fioParts[1],
-      middle_name: fioParts[2] || null
-    };
-    userState.step = 'select_course';
+    if (fioParts.some(part => !/^[а-яА-ЯёЁa-zA-Z-]+$/.test(part))) {
+      await ctx.reply('❌ ФИО может содержать только буквы и дефисы. Попробуйте снова:');
+      return;
+    }
+
+    this.stateService.updateUserState(telegramId, {
+      fio: {
+        last_name: fioParts[0],
+        first_name: fioParts[1],
+        middle_name: fioParts[2] || null
+      },
+      step: UserStep.SELECT_COURSE
+    });
 
     await ctx.reply(
       'Отлично! Теперь выберите ваш курс:',
       Markup.inlineKeyboard([
-        [Markup.button.callback('1 курс', 'course:1')],
-        [Markup.button.callback('2 курс', 'course:2')],
-        [Markup.button.callback('3 курс', 'course:3')],
+        [Markup.button.callback('1 курс', `${CallbackAction.COURSE}:1`)],
+        [Markup.button.callback('2 курс', `${CallbackAction.COURSE}:2`)],
+        [Markup.button.callback('3 курс', `${CallbackAction.COURSE}:3`)],
       ])
     );
   }
 
-  private async handleFioEdit(ctx: Context, text: string) {
+  private async handleFioEdit(ctx: Context, text: string): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
-    const fioParts = text.trim().split(' ');
+    const fioParts = text.trim().split(' ').filter(part => part.length > 0);
+
     if (fioParts.length < 2) {
       await ctx.reply('Пожалуйста, введите ФИО полностью (например: Иванов Иван Иванович):');
       return;
@@ -118,157 +103,174 @@ export class RegistrationService {
       await this.studentsService.updateStudentProfile(telegramId, {
         last_name: fioParts[0],
         first_name: fioParts[1],
-        middle_name: fioParts[2] || null
+        middle_name: fioParts[2] || undefined
       });
 
-      this.userStates.delete(telegramId);
+      this.stateService.deleteUserState(telegramId);
       await ctx.reply('✅ ФИО успешно обновлено!', this.getMainKeyboard());
     } catch (error) {
+      this.logger.error(`Error updating profile for ${telegramId}:`, error);
       await ctx.reply('❌ Произошла ошибка при обновлении профиля.');
     }
   }
 
-  async handleCallback(ctx: Context, data: string) {
+  async handleCallback(ctx: Context, data: string, userState: UserState): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
-    const userState = this.userStates.get(telegramId);
 
-    if (data.startsWith('course:')) {
+    if (data.startsWith(CallbackAction.COURSE)) {
       const course = parseInt(data.split(':')[1]);
-      const groups = this.groupsService.getGroupsByCourse(course);
-      
-      userState.course = course;
-      userState.step = 'select_group';
-      userState.groupsPage = 0;
-
-      await this.showGroupsPage(ctx, course, 0);
-    } 
-    else if (data.startsWith('group:')) {
+      await this.handleCourseSelection(ctx, course);
+    } else if (data.startsWith(CallbackAction.GROUP)) {
       const groupId = parseInt(data.split(':')[1]);
-      const group = this.groupsService.getGroupById(groupId);
-      
-      if (group && userState.fio) {
-        try {
-          const student = await this.studentsService.registerStudent({
-            telegram_id: telegramId,
-            username: ctx.from.username,
-            first_name: userState.fio.first_name,
-            last_name: userState.fio.last_name,
-            middle_name: userState.fio.middle_name,
-            course: userState.course,
-            group: group.name,
-          });
-
-          this.userStates.delete(telegramId);
-          
-          await ctx.editMessageText(
-            `✅ Регистрация завершена!\n\n` +
-            `ФИО: ${student.last_name} ${student.first_name} ${student.middle_name || ''}\n` +
-            `Группа: ${student.group}\n` +
-            `Курс: ${student.course}\n\n` +
-            `Добро пожаловать в систему!`
-          );
-
-          await ctx.reply('Теперь вы можете участвовать в мероприятиях!', this.getMainKeyboard());
-        } catch (error) {
-          await ctx.reply('❌ Произошла ошибка при регистрации.');
-        }
-      }
-    }
-    else if (data.startsWith('groups_page:')) {
-      const [_, course, page] = data.split(':');
-      await this.showGroupsPage(ctx, parseInt(course), parseInt(page));
-    }
-    else if (data === 'edit_fio') {
-      this.userStates.set(telegramId, { step: 'editing_fio' });
-      await ctx.reply('Введите ваше новое ФИО (например: Иванов Иван Иванович):');
-    } 
-    else if (data === 'edit_group') {
-      await ctx.reply(
-        'Выберите ваш курс:',
-        Markup.inlineKeyboard([
-          [Markup.button.callback('1 курс', 'edit_course:1')],
-          [Markup.button.callback('2 курс', 'edit_course:2')],
-          [Markup.button.callback('3 курс', 'edit_course:3')],
-        ])
-      );
-    } 
-    else if (data.startsWith('edit_course:')) {
+      await this.handleGroupSelection(ctx, groupId, userState);
+    } else if (data.startsWith(CallbackAction.GROUPS_PAGE)) {
+      const parts = data.split(':');
+      const course = parseInt(parts[1]);
+      const page = parseInt(parts[2]);
+      await this.showGroupsPage(ctx, course, page);
+    } else if (data === CallbackAction.EDIT_FIO) {
+      await this.handleEditFio(ctx);
+    } else if (data === CallbackAction.EDIT_GROUP) {
+      await this.handleEditGroup(ctx);
+    } else if (data.startsWith(CallbackAction.EDIT_COURSE)) {
       const course = parseInt(data.split(':')[1]);
       await this.showGroupsPageForEdit(ctx, course, 0);
-    } 
-    else if (data.startsWith('edit_groups_page:')) {
-      const [_, course, page] = data.split(':');
-      await this.showGroupsPageForEdit(ctx, parseInt(course), parseInt(page));
-    }
-    else if (data.startsWith('edit_group_select:')) {
+    } else if (data.startsWith(CallbackAction.EDIT_GROUPS_PAGE)) {
+      const parts = data.split(':');
+      const course = parseInt(parts[1]);
+      const page = parseInt(parts[2]);
+      await this.showGroupsPageForEdit(ctx, course, page);
+    } else if (data.startsWith(CallbackAction.EDIT_GROUP_SELECT)) {
       const groupId = parseInt(data.split(':')[1]);
-      const group = this.groupsService.getGroupById(groupId);
-      
-      if (group) {
-        try {
-          const userState = this.userStates.get(telegramId);
-          await this.studentsService.updateStudentProfile(telegramId, {
-            course: userState.editingCourse,
-            group: group.name,
-          });
+      await this.handleEditGroupSelection(ctx, groupId, userState);
+    }
+  }
 
-          this.userStates.delete(telegramId);
-          await ctx.editMessageText('✅ Группа успешно обновлена!');
-          await this.showProfile(ctx);
-        } catch (error) {
-          await ctx.reply('❌ Произошла ошибка при обновлении группы.');
-        }
+  private async handleCourseSelection(ctx: Context, course: number): Promise<void> {
+    if (!ctx.from) return;
+
+    this.stateService.updateUserState(ctx.from.id, {
+      course,
+      step: UserStep.SELECT_GROUP
+    });
+
+    await this.showGroupsPage(ctx, course, 0);
+  }
+
+  private async handleGroupSelection(ctx: Context, groupId: number, userState: UserState): Promise<void> {
+    if (!ctx.from || !userState.fio) return;
+
+    const group = this.groupsService.getGroupById(groupId);
+
+    if (group && userState.fio) {
+      try {
+        const studentData: StudentData = {
+          telegram_id: ctx.from.id,
+          username: ctx.from.username,
+          first_name: userState.fio.first_name,
+          last_name: userState.fio.last_name,
+          middle_name: userState.fio.middle_name || undefined,
+          course: userState.course!,
+          group: group.name,
+        };
+
+        const student = await this.studentsService.registerStudent(studentData);
+        this.stateService.deleteUserState(ctx.from.id);
+
+        await ctx.editMessageText(
+          `✅ Регистрация завершена!\n\n` +
+          `ФИО: ${student.last_name} ${student.first_name} ${student.middle_name || ''}\n` +
+          `Группа: ${student.group}\n` +
+          `Курс: ${student.course}\n\n` +
+          `Добро пожаловать в систему!`
+        );
+
+        await ctx.reply('Теперь вы можете участвовать в мероприятиях!', this.getMainKeyboard());
+      } catch (error) {
+        this.logger.error(`Registration error for user ${ctx.from.id}:`, error);
+        await ctx.reply('❌ Произошла ошибка при регистрации.');
       }
     }
   }
 
-  private async showGroupsPage(ctx: Context, course: number, page: number) {
+  private async handleEditFio(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+
+    this.stateService.setUserState(ctx.from.id, { step: UserStep.EDITING_FIO });
+    await ctx.reply('Введите ваше новое ФИО (например: Иванов Иван Иванович):');
+  }
+
+  private async handleEditGroup(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+
+    await ctx.reply(
+      'Выберите ваш курс:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('1 курс', `${CallbackAction.EDIT_COURSE}:1`)],
+        [Markup.button.callback('2 курс', `${CallbackAction.EDIT_COURSE}:2`)],
+        [Markup.button.callback('3 курс', `${CallbackAction.EDIT_COURSE}:3`)],
+      ])
+    );
+  }
+
+  private async handleEditGroupSelection(ctx: Context, groupId: number, userState: UserState): Promise<void> {
+    if (!ctx.from) return;
+
+    const group = this.groupsService.getGroupById(groupId);
+
+    if (group) {
+      try {
+        await this.studentsService.updateStudentProfile(ctx.from.id, {
+          course: userState.editingCourse,
+          group: group.name,
+        });
+
+        this.stateService.deleteUserState(ctx.from.id);
+        await ctx.editMessageText('✅ Группа успешно обновлена!');
+        await this.showProfile(ctx);
+      } catch (error) {
+        this.logger.error(`Error updating group for user ${ctx.from.id}:`, error);
+        await ctx.reply('❌ Произошла ошибка при обновлении группы.');
+      }
+    }
+  }
+
+  private async showGroupsPage(ctx: Context, course: number, page: number): Promise<void> {
     const groups = this.groupsService.getGroupsByCourse(course);
-    const groupsPerPage = 10;
-    const totalPages = Math.ceil(groups.length / groupsPerPage);
-    
-    const startIndex = page * groupsPerPage;
-    const endIndex = startIndex + groupsPerPage;
+    const totalPages = Math.ceil(groups.length / GROUPS_PER_PAGE);
+
+    const startIndex = page * GROUPS_PER_PAGE;
+    const endIndex = startIndex + GROUPS_PER_PAGE;
     const pageGroups = groups.slice(startIndex, endIndex);
 
-    const userState = this.userStates.get(ctx.from!.id);
-    if (userState) {
-      userState.groupsPage = page;
-    }
-
-    // Создаем кнопки групп (2 колонки для лучшего отображения)
+    // Создаем кнопки групп (2 колонки)
     const groupButtons: any[][] = [];
     for (let i = 0; i < pageGroups.length; i += 2) {
       const row: any[] = [];
       if (pageGroups[i]) {
-        row.push(Markup.button.callback(pageGroups[i].name, `group:${pageGroups[i].id}`));
+        row.push(Markup.button.callback(pageGroups[i].name, `${CallbackAction.GROUP}:${pageGroups[i].id}`));
       }
       if (pageGroups[i + 1]) {
-        row.push(Markup.button.callback(pageGroups[i + 1].name, `group:${pageGroups[i + 1].id}`));
+        row.push(Markup.button.callback(pageGroups[i + 1].name, `${CallbackAction.GROUP}:${pageGroups[i + 1].id}`));
       }
       if (row.length > 0) {
         groupButtons.push(row);
       }
     }
 
-    // Создаем кнопки навигации
+    // Навигация
     const navigationRow: any[] = [];
     if (page > 0) {
-      navigationRow.push(Markup.button.callback('⬅️ Назад', `groups_page:${course}:${page - 1}`));
+      navigationRow.push(Markup.button.callback('⬅️ Назад', `${CallbackAction.GROUPS_PAGE}:${course}:${page - 1}`));
     }
-    
-    // Добавляем кнопку "В начало" если много страниц
     if (page > 2) {
-      navigationRow.push(Markup.button.callback('🏠 В начало', `groups_page:${course}:0`));
+      navigationRow.push(Markup.button.callback('🏠 В начало', `${CallbackAction.GROUPS_PAGE}:${course}:0`));
     }
-    
     if (page < totalPages - 1) {
-      navigationRow.push(Markup.button.callback('Вперед ➡️', `groups_page:${course}:${page + 1}`));
+      navigationRow.push(Markup.button.callback('Вперед ➡️', `${CallbackAction.GROUPS_PAGE}:${course}:${page + 1}`));
     }
-    
-    // Добавляем навигацию только если есть кнопки
     if (navigationRow.length > 0) {
       groupButtons.push(navigationRow);
     }
@@ -285,55 +287,49 @@ export class RegistrationService {
         await ctx.reply(messageText, Markup.inlineKeyboard(groupButtons));
       }
     } catch (error) {
-      // Если не можем отредактировать сообщение, отправляем новое
       await ctx.reply(messageText, Markup.inlineKeyboard(groupButtons));
     }
   }
 
-  private async showGroupsPageForEdit(ctx: Context, course: number, page: number) {
+  private async showGroupsPageForEdit(ctx: Context, course: number, page: number): Promise<void> {
     const groups = this.groupsService.getGroupsByCourse(course);
-    const groupsPerPage = 10;
-    const totalPages = Math.ceil(groups.length / groupsPerPage);
-    
-    const startIndex = page * groupsPerPage;
-    const endIndex = startIndex + groupsPerPage;
+    const totalPages = Math.ceil(groups.length / GROUPS_PER_PAGE);
+
+    const startIndex = page * GROUPS_PER_PAGE;
+    const endIndex = startIndex + GROUPS_PER_PAGE;
     const pageGroups = groups.slice(startIndex, endIndex);
 
-    const userState = this.userStates.get(ctx.from!.id);
-    if (userState) {
-      userState.editingCourse = course;
-      userState.groupsPage = page;
-    }
+    this.stateService.updateUserState(ctx.from!.id, {
+      editingCourse: course,
+      groupsPage: page
+    });
 
     // Создаем кнопки групп (2 колонки)
     const groupButtons: any[][] = [];
     for (let i = 0; i < pageGroups.length; i += 2) {
       const row: any[] = [];
       if (pageGroups[i]) {
-        row.push(Markup.button.callback(pageGroups[i].name, `edit_group_select:${pageGroups[i].id}`));
+        row.push(Markup.button.callback(pageGroups[i].name, `${CallbackAction.EDIT_GROUP_SELECT}:${pageGroups[i].id}`));
       }
       if (pageGroups[i + 1]) {
-        row.push(Markup.button.callback(pageGroups[i + 1].name, `edit_group_select:${pageGroups[i + 1].id}`));
+        row.push(Markup.button.callback(pageGroups[i + 1].name, `${CallbackAction.EDIT_GROUP_SELECT}:${pageGroups[i + 1].id}`));
       }
       if (row.length > 0) {
         groupButtons.push(row);
       }
     }
 
-    // Создаем кнопки навигации
+    // Навигация
     const navigationRow: any[] = [];
     if (page > 0) {
-      navigationRow.push(Markup.button.callback('⬅️ Назад', `edit_groups_page:${course}:${page - 1}`));
+      navigationRow.push(Markup.button.callback('⬅️ Назад', `${CallbackAction.EDIT_GROUPS_PAGE}:${course}:${page - 1}`));
     }
-    
     if (page > 2) {
-      navigationRow.push(Markup.button.callback('🏠 В начало', `edit_groups_page:${course}:0`));
+      navigationRow.push(Markup.button.callback('🏠 В начало', `${CallbackAction.EDIT_GROUPS_PAGE}:${course}:0`));
     }
-    
     if (page < totalPages - 1) {
-      navigationRow.push(Markup.button.callback('Вперед ➡️', `edit_groups_page:${course}:${page + 1}`));
+      navigationRow.push(Markup.button.callback('Вперед ➡️', `${CallbackAction.EDIT_GROUPS_PAGE}:${course}:${page + 1}`));
     }
-    
     if (navigationRow.length > 0) {
       groupButtons.push(navigationRow);
     }
@@ -350,25 +346,21 @@ export class RegistrationService {
     }
   }
 
-  async handleProfile(ctx: Context) {
+  async handleProfile(ctx: Context): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const student = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (!student) {
       await ctx.reply('Сначала зарегистрируйтесь с помощью /start');
       return;
     }
 
-    // Гарантируем, что рейтинг отображается корректно
-    const rating = student.rating && !isNaN(Number(student.rating)) 
-      ? Number(student.rating).toFixed(2) 
-      : '3.00';
-
+    const rating = this.formatRating(student.rating);
     await ctx.reply(
       `👤 Ваш профиль:\n\n` +
-      `Telegram ID: ${telegramId}\n` +  // Изменено: показываем Telegram ID вместо ID студента из БД
+      `Telegram ID: ${telegramId}\n` +
       `ФИО: ${student.last_name} ${student.first_name} ${student.middle_name || ''}\n` +
       `Группа: ${student.group}\n` +
       `Курс: ${student.course}\n` +
@@ -377,22 +369,18 @@ export class RegistrationService {
     );
   }
 
-  async showProfile(ctx: Context) {
+  async showProfile(ctx: Context): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const student = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (!student) return;
 
-    // Гарантируем, что рейтинг отображается корректно
-    const rating = student.rating && !isNaN(Number(student.rating)) 
-      ? Number(student.rating).toFixed(2) 
-      : '3.00';
-
+    const rating = this.formatRating(student.rating);
     await ctx.reply(
       `👤 Ваш профиль:\n\n` +
-      `🆔 Telegram ID: ${telegramId}\n` +  // Изменено: показываем Telegram ID вместо ID студента из БД
+      `🆔 Telegram ID: ${telegramId}\n` +
       `ФИО: ${student.last_name} ${student.first_name} ${student.middle_name || ''}\n` +
       `👥 Группа: ${student.group}\n` +
       `🎓 Курс: ${student.course}\n` +
@@ -401,8 +389,93 @@ export class RegistrationService {
     );
   }
 
-  async handleEditProfile(ctx: Context) {
+  async handleEditProfile(ctx: Context): Promise<void> {
     await this.handleProfile(ctx);
+  }
+
+  async handleRating(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+
+    const telegramId = ctx.from.id;
+    const student = await this.studentsService.findByTelegramId(telegramId);
+
+    if (!student) {
+      await ctx.reply('Сначала зарегистрируйтесь с помощью /start');
+      return;
+    }
+
+    const participations = await this.participationsService.getStudentParticipations(student.id);
+    const approvedCount = participations.filter(p => p.status === 'approved').length;
+    const rating = this.formatRating(student.rating, false) as number;
+
+    await ctx.reply(
+      `⭐ Ваш рейтинг: ${rating.toFixed(2)}/5.0\n` +
+      `✅ Подтвержденных участий: ${approvedCount}\n\n` +
+      this.getRatingMessage(rating)
+    );
+  }
+
+  async showEventsWithParticipation(ctx: Context, studentId: number): Promise<void> {
+    const student = await this.studentsService.findById(studentId);
+    if (!student) return;
+
+    const events = await this.eventsService.getEventsByCourse(student.course);
+
+    if (events.length === 0) {
+      await ctx.reply('На вашем курсе пока нет мероприятий.');
+      return;
+    }
+
+    // Получаем все участия одним запросом (используем существующий метод)
+    const existingParticipations = await this.participationsService.getStudentParticipations(student.id);
+    const participatingEventIds = new Set(existingParticipations.map(p => p.event.id)); // Исправлено здесь
+
+    for (const event of events) {
+      const isParticipating = participatingEventIds.has(event.id);
+      
+      let buttonText = 'Участвовать ✅';
+      let callbackData = `${CallbackAction.PARTICIPATE}:${event.id}`;
+      
+      if (isParticipating) {
+        buttonText = '✅ Уже участвуете';
+        callbackData = CallbackAction.ALREADY_PARTICIPATING;
+      }
+
+      const buttons = [Markup.button.callback(buttonText, callbackData)];
+      
+      await ctx.reply(
+        `📅 ${event.title}\n\n${event.description}\n\nБаллы: ${event.points_awarded}`,
+        Markup.inlineKeyboard(buttons)
+      );
+    }
+  }
+
+  async showStudentParticipations(ctx: Context, studentId: number): Promise<void> {
+    const participations = await this.participationsService.getStudentParticipations(studentId);
+
+    if (participations.length === 0) {
+      await ctx.reply('Вы еще не участвовали в мероприятиях.');
+      return;
+    }
+
+    let message = '📅 Ваши участия в мероприятиях:\n\n';
+
+    for (const participation of participations) {
+      const statusEmoji = participation.status === 'approved' ? '✅' :
+                         participation.status === 'rejected' ? '❌' : '⏳';
+      const archivedEmoji = participation.event.is_archived ? '📁 ' : '';
+
+      message += `${archivedEmoji}${statusEmoji} ${participation.event.title}\n`;
+      message += `Статус: ${this.getStatusText(participation.status)}\n`;
+
+      if (participation.admin_comment) {
+        message += `Комментарий: ${participation.admin_comment}\n`;
+      }
+
+      message += `Дата: ${participation.created_at.toLocaleDateString()}\n\n`;
+    }
+
+    await ctx.reply(message);
   }
 
   private getMainKeyboard() {
@@ -413,35 +486,14 @@ export class RegistrationService {
     ]).resize();
   }
 
-  async handleRating(ctx: Context) {
-    if (!ctx.from) return;
-
-    const telegramId = ctx.from.id;
-    const student = await this.studentsService.findByTelegramId(telegramId);
-    
-    if (!student) {
-      await ctx.reply('Сначала зарегистрируйтесь с помощью /start');
-      return;
-    }
-
-    // Получаем ВСЕ участия (включая архивированные) для подсчета
-    const participations = await this.participationsService.getStudentParticipations(student.id);
-    const approvedCount = participations.filter(p => p.status === 'approved').length;
-
-    const rating = student.rating && !isNaN(Number(student.rating)) 
-      ? Number(student.rating) 
-      : 3.0;
-    
-    await ctx.reply(
-      `⭐ Ваш рейтинг: ${rating.toFixed(2)}/5.0\n` +
-      `✅ Подтвержденных участий: ${approvedCount}\n\n` +
-      this.getRatingMessage(rating)
-    );
+  private formatRating(rating: any, asString: boolean = true): string | number {
+    const numericRating = rating && !isNaN(Number(rating)) ? Number(rating) : 3.0;
+    return asString ? numericRating.toFixed(2) : numericRating;
   }
 
   private getRatingMessage(rating: number): string {
     if (rating < 3) {
-      return '⚠️ Ваш рейтинг ниже 3.0! Примите участие в мероприятиях, чтобы повысить рейтинг.';
+      return '⚠️ Ваш рейтинг ниже 3.0! Примите участие в мероприятиях, чтобы повысить рейтинг. Если не хотите вылететь из колледжа ;)';
     } else if (rating < 4) {
       return '📈 Хороший результат! Продолжайте участвовать в мероприятиях.';
     } else {
@@ -449,15 +501,12 @@ export class RegistrationService {
     }
   }
 
-  getUserState(telegramId: number): any {
-    return this.userStates.get(telegramId);
-  }
-
-  setUserState(telegramId: number, state: any): void {
-    this.userStates.set(telegramId, state);
-  }
-
-  deleteUserState(telegramId: number): void {
-    this.userStates.delete(telegramId);
+  private getStatusText(status: string): string {
+    const statusMap = {
+      'pending': 'Ожидает проверки',
+      'approved': 'Подтверждено',
+      'rejected': 'Отклонено'
+    };
+    return statusMap[status] || status;
   }
 }
