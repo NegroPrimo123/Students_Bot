@@ -62,7 +62,7 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new Error('Event not found');
+      throw new NotFoundException('Мероприятие не найдено');
     }
 
     event.is_archived = true;
@@ -77,11 +77,11 @@ export class EventsService {
     });
 
     if (!event) {
-      throw new Error('Event not found');
+      throw new NotFoundException('Мероприятие не найдено');
     }
 
     event.is_archived = false;
-    event.archived_at = undefined; // Используем undefined вместо null
+    event.archived_at = undefined; 
 
     return await this.eventsRepository.save(event);
   }

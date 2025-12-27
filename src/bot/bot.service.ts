@@ -54,6 +54,16 @@ export class BotService implements OnModuleInit {
     this.bot.on('text', this.handleText.bind(this));
   }
 
+
+  private ensureUserState(telegramId: number): any {
+    let userState = this.userStates.get(telegramId);
+    if (!userState) {
+        userState = {};
+        this.userStates.set(telegramId, userState);
+    }
+    return userState;
+}
+
   async handleStart(ctx: Context) {
     await this.registrationService.handleStart(ctx);
   }
@@ -76,8 +86,9 @@ export class BotService implements OnModuleInit {
         break;
       
       case '📎 Отправить сертификат':
-        await this.certificateService.handleCertificateUpload(ctx, userState);
-        break;
+    const userState = this.ensureUserState(telegramId);
+    await this.certificateService.handleCertificateUpload(ctx, userState);
+    break;
       
       case '⭐ Мой рейтинг':
         await this.registrationService.handleRating(ctx);
