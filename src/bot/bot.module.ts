@@ -14,6 +14,10 @@ import { StatisticsService } from '../statistics/statistics.service';
 import { Student } from '../students/student.entity';
 import { Event } from '../events/event.entity';
 import { Participation } from '../participations/participation.entity';
+import { TextHandler } from './handlers/TextHandler';
+import { CallbackHandler } from './handlers/CallbackHandler';
+import { DocumentHandler } from './handlers/DocumentHandler';
+import { StateService } from './state.service';
 
 @Module({
   imports: [
@@ -25,13 +29,23 @@ import { Participation } from '../participations/participation.entity';
     BotService,
     RegistrationService,
     CertificateService,
-    NotificationService,
+    NotificationService, 
     StudentsService,
     EventsService,
     ParticipationsService,
     GroupsService,
     StatisticsService,
+    TextHandler,
+    CallbackHandler,
+    DocumentHandler,
+    StateService,
   ],
-  exports: [BotService],
+  exports: [
+    BotService,
+    RegistrationService,
+    CertificateService,
+    NotificationService,
+    StateService,
+  ],
 })
 export class BotModule {}

@@ -321,7 +321,7 @@ export class ParticipationsService {
    */
   async applyInactivityPenalty(): Promise<{ penalizedStudents: number }> {
     const inactiveThreshold = 30; // дней
-    const penaltyAmount = 0.2; // Штраф за неактивность
+    const penaltyAmount = 3; // Штраф за неактивность
     
     const students = await this.studentsService.getAllStudents();
     let penalizedCount = 0;

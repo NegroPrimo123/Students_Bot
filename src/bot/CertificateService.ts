@@ -3,6 +3,9 @@ import { Context, Markup } from 'telegraf';
 import { StudentsService } from '../students/students.service';
 import { EventsService } from '../events/events.service';
 import { ParticipationsService } from '../participations/participations.service';
+import { StateService } from './state.service';
+import { UserState, ParticipationData } from './interfaces';
+import { UserStep, UserAction, CallbackAction, EVENTS_PER_PAGE } from './constants';
 
 @Injectable()
 export class CertificateService {
@@ -12,23 +15,24 @@ export class CertificateService {
     private studentsService: StudentsService,
     private eventsService: EventsService,
     private participationsService: ParticipationsService,
+    private stateService: StateService,
   ) {}
 
-  // Убираем работу с userStates, передаем состояние как параметр
-  async handleCertificateUpload(ctx: Context, userState: any) {
+  async handleCertificateUpload(ctx: Context, userState?: UserState): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const student = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (!student) {
       await ctx.reply('Сначала зарегистрируйтесь с помощью /start');
       return;
     }
 
-    // Устанавливаем состояние для загрузки сертификата
-    userState.step = 'waiting_for_certificate';
-    userState.action = 'upload_certificate';
+    this.stateService.updateUserState(telegramId, {
+      step: UserStep.WAITING_FOR_CERTIFICATE,
+      action: UserAction.UPLOAD_CERTIFICATE
+    });
 
     await ctx.reply(
       '📎 Отправьте сертификат в виде документа (PDF, JPG, PNG):\n\n' +
@@ -36,33 +40,31 @@ export class CertificateService {
     );
   }
 
-  async handleDocument(ctx: Context, userState: any, fileId: string, fileName: string, fileSize?: number) {
+  async handleDocument(
+    ctx: Context,
+    userState: UserState,
+    fileId: string,
+    fileName: string,
+    fileSize?: number
+  ): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const student = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (!student) {
       await ctx.reply('Сначала зарегистрируйтесь с помощью /start');
       return;
     }
 
-    // Проверяем размер файла (максимум 20MB)
-    if (fileSize && fileSize > 20 * 1024 * 1024) {
-      await ctx.reply('❌ Файл слишком большой. Максимальный размер: 20MB');
-      return;
-    }
-
-    if (userState && userState.step === 'waiting_event_certificate' && userState.selectedEventId) {
-      // Это сертификат для конкретного мероприятия (из кнопки "Участвовал")
+    if (userState.step === UserStep.WAITING_EVENT_CERTIFICATE && userState.selectedEventId) {
       await this.handleEventCertificate(ctx, userState.selectedEventId, fileId, fileName);
     } else {
-      // Это общая загрузка сертификата (из кнопки "Отправить сертификат")
       await this.handleGeneralCertificate(ctx, fileId, fileName, userState);
     }
   }
 
-  private async handleEventCertificate(ctx: Context, eventId: number, fileId: string, fileName: string) {
+  private async handleEventCertificate(ctx: Context, eventId: number, fileId: string, fileName: string): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
@@ -75,12 +77,14 @@ export class CertificateService {
     }
 
     try {
-      // Создаем запись об участии
-      const participation = await this.participationsService.createParticipation({
+      const participationData: ParticipationData = {
         studentId: student.id,
-        eventId: eventId,
+        eventId,
         certificateFileId: fileId,
-      });
+      };
+
+      await this.participationsService.createParticipation(participationData);
+      this.stateService.deleteUserState(telegramId);
 
       await ctx.reply(
         `✅ Участие зарегистрировано!\n\n` +
@@ -91,7 +95,6 @@ export class CertificateService {
         `📋 Статус: Ожидает проверки администратором\n\n` +
         `Администратор проверит ваш сертификат и обновит статус.`
       );
-
     } catch (error: any) {
       if (error.message === 'Вы уже участвуете в этом мероприятии') {
         await ctx.reply(
@@ -99,38 +102,40 @@ export class CertificateService {
           'Один студент может участвовать в каждом мероприятии только один раз.'
         );
       } else {
+        this.logger.error(`Event certificate error for user ${telegramId}:`, error);
         await ctx.reply('❌ Произошла ошибка при регистрации участия.');
-        this.logger.error('Event participation error:', error);
       }
     }
   }
 
-  private async handleGeneralCertificate(ctx: Context, fileId: string, fileName: string, userState: any) {
+  private async handleGeneralCertificate(
+    ctx: Context,
+    fileId: string,
+    fileName: string,
+    userState: UserState
+  ): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
-
-    // Сохраняем file_id в состоянии пользователя
-    userState.step = 'certificate_uploaded';
-    userState.action = 'upload_certificate';
-    userState.certificateFileId = fileId;
-    userState.certificateFileName = fileName;
+    this.stateService.updateUserState(telegramId, {
+      step: UserStep.CERTIFICATE_UPLOADED,
+      action: UserAction.UPLOAD_CERTIFICATE,
+      certificateFileId: fileId,
+      certificateFileName: fileName
+    });
 
     await ctx.reply(
       `✅ Сертификат "${fileName}" успешно загружен!\n\n` +
       `Теперь выберите мероприятие, к которому относится этот сертификат:`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('📅 Выбрать мероприятие', 'select_event_for_certificate')]
+        [Markup.button.callback('📅 Выбрать мероприятие', CallbackAction.SELECT_EVENT_FOR_CERTIFICATE)]
       ])
     );
   }
 
-  async handleSelectEventForCertificate(ctx: Context, userState: any) {
+  async handleSelectEventForCertificate(ctx: Context, userState: UserState): Promise<void> {
     if (!ctx.from) return;
 
-    const telegramId = ctx.from.id;
-    
-    // Проверяем, есть ли загруженный сертификат
     if (!userState || !userState.certificateFileId) {
       await ctx.reply(
         '❌ Сначала отправьте сертификат как документ.\n\n' +
@@ -142,49 +147,46 @@ export class CertificateService {
     await this.showEventsForCertificateSelection(ctx, 0);
   }
 
-  // Делаем метод публичным
-  async showEventsForCertificateSelection(ctx: Context, page: number = 0) {
+  async showEventsForCertificateSelection(ctx: Context, page: number = 0): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const student = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (!student) {
       await ctx.reply('Сначала зарегистрируйтесь с помощью /start');
       return;
     }
 
     const events = await this.eventsService.getEventsByCourse(student.course);
-    
+
     if (events.length === 0) {
       await ctx.reply('❌ Нет доступных мероприятий.');
       return;
     }
 
-    const eventsPerPage = 6;
-    const totalPages = Math.ceil(events.length / eventsPerPage);
-    
-    const startIndex = page * eventsPerPage;
-    const endIndex = startIndex + eventsPerPage;
+    const totalPages = Math.ceil(events.length / EVENTS_PER_PAGE);
+    const startIndex = page * EVENTS_PER_PAGE;
+    const endIndex = startIndex + EVENTS_PER_PAGE;
     const pageEvents = events.slice(startIndex, endIndex);
 
     // Создаем кнопки мероприятий
-    const eventButtons: any[][] = pageEvents.map(event => 
+    const eventButtons: any[][] = pageEvents.map(event =>
       [Markup.button.callback(
-        `🎯 ${event.title} (${event.points_awarded} баллов)`, 
-        `certificate_event:${event.id}`
+        `🎯 ${event.title} (${event.points_awarded} баллов)`,
+        `${CallbackAction.CERTIFICATE_EVENT}:${event.id}`
       )]
     );
 
     // Кнопки навигации
     const navigationRow: any[] = [];
     if (page > 0) {
-      navigationRow.push(Markup.button.callback('⬅️ Назад', `certificate_events_page:${page - 1}`));
+      navigationRow.push(Markup.button.callback('⬅️ Назад', `${CallbackAction.CERTIFICATE_EVENTS_PAGE}:${page - 1}`));
     }
     if (page < totalPages - 1) {
-      navigationRow.push(Markup.button.callback('Вперед ➡️', `certificate_events_page:${page + 1}`));
+      navigationRow.push(Markup.button.callback('Вперед ➡️', `${CallbackAction.CERTIFICATE_EVENTS_PAGE}:${page + 1}`));
     }
-    
+
     if (navigationRow.length > 0) {
       eventButtons.push(navigationRow);
     }
@@ -192,28 +194,23 @@ export class CertificateService {
     const messageText = `Выберите мероприятие для сертификата (страница ${page + 1} из ${totalPages}):`;
 
     try {
-      // Пытаемся отредактировать сообщение, если это callback
       if ((ctx.callbackQuery as any).message) {
         await ctx.editMessageText(messageText, Markup.inlineKeyboard(eventButtons));
       } else {
         await ctx.reply(messageText, Markup.inlineKeyboard(eventButtons));
       }
     } catch (error) {
-      // Если не получается отредактировать, отправляем новое сообщение
       await ctx.reply(messageText, Markup.inlineKeyboard(eventButtons));
     }
   }
 
-  async handleCertificateEventSelection(ctx: Context, eventId: number, userState: any) {
+  async handleCertificateEventSelection(ctx: Context, eventId: number, userState: UserState): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
-    
-    // Проверяем, есть ли загруженный сертификат
+
     if (!userState || !userState.certificateFileId) {
-      await ctx.reply(
-        '❌ Ошибка: сертификат не найден. Попробуйте начать заново.'
-      );
+      await ctx.reply('❌ Ошибка: сертификат не найден. Попробуйте начать заново.');
       return;
     }
 
@@ -226,9 +223,8 @@ export class CertificateService {
     }
 
     try {
-      // Проверяем, не существует ли уже участие
       const existingParticipation = await this.participationsService.checkExistingParticipation(
-        student.id, 
+        student.id,
         eventId
       );
 
@@ -240,12 +236,14 @@ export class CertificateService {
         return;
       }
 
-      // Создаем запись об участии
-      const participation = await this.participationsService.createParticipation({
+      const participationData: ParticipationData = {
         studentId: student.id,
-        eventId: eventId,
+        eventId,
         certificateFileId: userState.certificateFileId,
-      });
+      };
+
+      await this.participationsService.createParticipation(participationData);
+      this.stateService.deleteUserState(telegramId);
 
       await ctx.editMessageText(
         `✅ Сертификат успешно отправлен на проверку!\n\n` +
@@ -257,7 +255,6 @@ export class CertificateService {
         `Администратор проверит ваш сертификат и обновит статус. ` +
         `Вы можете отслеживать статус в разделе "📅 Мои мероприятия".`
       );
-
     } catch (error: any) {
       if (error.message === 'Вы уже участвуете в этом мероприятии') {
         await ctx.reply(
@@ -265,23 +262,22 @@ export class CertificateService {
           'Один студент может участвовать в каждом мероприятии только один раз.'
         );
       } else {
+        this.logger.error(`Certificate submission error for user ${telegramId}:`, error);
         await ctx.reply('❌ Произошла ошибка при отправке сертификата.');
-        this.logger.error('Certificate submission error:', error);
       }
     }
   }
 
-  async handleParticipation(ctx: Context, eventId: number, userState: any) {
+  async handleParticipation(ctx: Context, eventId: number, userState: UserState): Promise<void> {
     if (!ctx.from) return;
 
     const telegramId = ctx.from.id;
     const student = await this.studentsService.findByTelegramId(telegramId);
-    
+
     if (!student) return;
 
-    // Проверяем, не участвует ли уже студент
     const existingParticipation = await this.participationsService.checkExistingParticipation(
-      student.id, 
+      student.id,
       eventId
     );
 
@@ -302,8 +298,9 @@ export class CertificateService {
       `После загрузки файла вы сможете подтвердить участие.`
     );
 
-    // Сохраняем выбранное мероприятие в состоянии
-    userState.selectedEventId = eventId;
-    userState.step = 'waiting_event_certificate';
+    this.stateService.updateUserState(telegramId, {
+      selectedEventId: eventId,
+      step: UserStep.WAITING_EVENT_CERTIFICATE
+    });
   }
 }
