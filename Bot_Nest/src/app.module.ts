@@ -9,6 +9,7 @@ import { EventsModule } from './events/events.module';
 import { ParticipationsModule } from './participations/participations.module';
 import { BotModule } from './bot/bot.module';
 import { StatisticsModule } from './statistics/statistics.module'; 
+import { AuthModule } from './auth/auth.module'; // Этот импорт уже есть
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { StatisticsModule } from './statistics/statistics.module';
     ParticipationsModule,
     BotModule,
     StatisticsModule, 
+    AuthModule, 
   ],
   controllers: [AppController],
   providers: [AppService],
